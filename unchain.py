@@ -331,10 +331,27 @@ class BotWorker(QObject):
             self.task_wall_updated.emit(None)
 
     def _handle_recipe_fetch(self):
-        if not self._ife and not self._page:
+        if not self._page:
             self.recipes_fetched.emit(None)
             self.log_msg.emit("ERROR: Browser not launched for recipe fetch")
             return
+        if not self._ife:
+            self.log_msg.emit("Game scripts not loaded yet — initializing...")
+            try:
+                game_frame = self._find_game_iframe(wait_ok=True)
+                if not game_frame:
+                    self.recipes_fetched.emit(None)
+                    self.log_msg.emit("ERROR: Game iframe not found")
+                    return
+                def _run_in_frame(script):
+                    wrapped = "(async function() { try { " + script + " } catch(e) { return {_error: String(e)}; } })()"
+                    return game_frame.evaluate(wrapped)
+                self._ife = init_game(_run_in_frame, wait_for_ready=True)
+                self.log_msg.emit("Game scripts initialized for recipe fetch")
+            except Exception as e:
+                self.recipes_fetched.emit(None)
+                self.log_msg.emit(f"ERROR initializing game for recipe fetch: {e}")
+                return
         js_code = '''
             try {
                 let api = new API();
@@ -347,11 +364,7 @@ class BotWorker(QObject):
             } catch(e) { return {_error: e.message}; }
         '''
         try:
-            if self._ife:
-                data = self._ife(js_code)
-            else:
-                wrapped = "(async function() { try { " + js_code + " } catch(e) { return {_error: String(e)}; } })()"
-                data = self._page.evaluate(wrapped)
+            data = self._ife(js_code)
             if data and not data.get('_error'):
                 recipes = data.get('recipes', [])
                 recipe_list = []
