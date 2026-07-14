@@ -331,22 +331,27 @@ class BotWorker(QObject):
             self.task_wall_updated.emit(None)
 
     def _handle_recipe_fetch(self):
-        if not self._ife:
+        if not self._ife and not self._page:
             self.recipes_fetched.emit(None)
-            self.log_msg.emit("ERROR: Game not initialized for recipe fetch")
+            self.log_msg.emit("ERROR: Browser not launched for recipe fetch")
             return
+        js_code = '''
+            try {
+                let api = new API();
+                let recipes = [];
+                if (typeof api.get_recipes === 'function') {
+                    let r = await api.get_recipes();
+                    recipes = JSON.parse(JSON.stringify(r._data || r));
+                }
+                return {recipes: Array.isArray(recipes) ? recipes : []};
+            } catch(e) { return {_error: e.message}; }
+        '''
         try:
-            data = self._ife('''
-                try {
-                    let api = new API();
-                    let recipes = [];
-                    if (typeof api.get_recipes === 'function') {
-                        let r = await api.get_recipes();
-                        recipes = JSON.parse(JSON.stringify(r._data || r));
-                    }
-                    return {recipes: Array.isArray(recipes) ? recipes : []};
-                } catch(e) { return {_error: e.message}; }
-            ''')
+            if self._ife:
+                data = self._ife(js_code)
+            else:
+                wrapped = "(async function() { try { " + js_code + " } catch(e) { return {_error: String(e)}; } })()"
+                data = self._page.evaluate(wrapped)
             if data and not data.get('_error'):
                 recipes = data.get('recipes', [])
                 recipe_list = []
@@ -2650,7 +2655,7 @@ class SettingsDialog(QDialog):
             self._recipe_status_label.setText("No recipes loaded yet — click Fetch from Game")
 
     def _fetch_recipes(self):
-        if self._bot_worker and self._bot_worker._ife:
+        if self._bot_worker and (self._bot_worker._ife or self._bot_worker._page):
             self._fetch_recipes_btn.setEnabled(False)
             self._fetch_recipes_btn.setText("Fetching...")
             self._recipe_status_label.setText("Fetching recipes from game...")
