@@ -1,0 +1,6 @@
+@echo off
+title UNCHAINED - Stopping...
+echo Stopping UNCHAINED...
+powershell -command "Get-Process python -ErrorAction SilentlyContinue | Where-Object { $_.Path -like '*Python313*' } | Stop-Process -Force"
+echo UNCHAINED stopped.
+timeout /t 2 /nobreak >nul
