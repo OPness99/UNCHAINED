@@ -907,7 +907,6 @@ class BotWorker(QObject):
             return
 
         self.memory.optimize_config(self.config)
-        self._handle_seed_config_request()
 
         def ife(script):
             if self._stop.is_set() or not self._farming_active:
@@ -955,6 +954,13 @@ class BotWorker(QObject):
                     return
         for s in (summary if isinstance(summary, list) else []):
             self.log_msg.emit(f"  Garden '{s.get('code')}': {s.get('bed_count')} beds")
+
+        try:
+            self._handle_seed_config_request()
+        except Exception as e:
+            self.log_msg.emit(f"Seed config fetch failed (non-fatal): {e}")
+
+        time.sleep(2)
 
         tracker = PlotTracker()
         cycle_count = 0
