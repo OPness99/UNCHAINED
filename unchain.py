@@ -256,6 +256,7 @@ class BotWorker(QObject):
             try:
                 self._ife = init_game(_run_in_frame, wait_for_ready=True)
                 self.log_msg.emit("Game scripts re-initialized")
+                logger.info("_reconnect_ife: init_game succeeded")
                 return
             except Exception as e:
                 if self._stop.is_set():
@@ -368,6 +369,7 @@ class BotWorker(QObject):
 
     def _ensure_game_ready(self):
         if self._ife:
+            logger.info("_ensure_game_ready: ife already set, returning True")
             return True
         if not self._page:
             self.log_msg.emit("ERROR: Browser not launched")
@@ -383,9 +385,11 @@ class BotWorker(QObject):
                 return iframe.evaluate(wrapped)
             self._ife = init_game(_run_in_frame, wait_for_ready=True)
             self.log_msg.emit("Game scripts loaded")
+            logger.info("_ensure_game_ready: init_game succeeded")
             return True
         except Exception as e:
             self.log_msg.emit(f"ERROR: Game init failed: {e}")
+            logger.info(f"_ensure_game_ready: init_game FAILED: {e}")
             return False
 
     def _run_one_cycle(self):
@@ -906,6 +910,25 @@ class BotWorker(QObject):
                 self._bridge.update_status(state="launched", last_cycle_result="game init failed")
             return
 
+        logger.info("init_game completed, waiting for game scripts to settle...")
+        for _settle in range(10):
+            if self._stop.is_set():
+                return
+            time.sleep(1)
+            try:
+                test = self._ife("1+1")
+                if test == 2:
+                    logger.info(f"Game scripts settled after {_settle + 1}s")
+                    break
+            except Exception as e:
+                logger.info(f"Settle check {_settle + 1} failed: {e}")
+                self._ife = None
+                try:
+                    self._reconnect_ife()
+                except Exception:
+                    pass
+                break
+
         self.memory.optimize_config(self.config)
 
         def ife(script):
@@ -932,6 +955,7 @@ class BotWorker(QObject):
         for _init_attempt in range(3):
             try:
                 self.log_msg.emit(f"Fetching garden data (attempt {_init_attempt + 1})...")
+                logger.info(f"Garden data fetch attempt {_init_attempt + 1}, ife={'set' if self._ife else 'None'}")
                 summary = ife('''
                     let api = new API();
                     let g = (await api.get_user_gardens())._data;
@@ -940,8 +964,10 @@ class BotWorker(QObject):
                         bed_count: (garden.placedBeds || []).length
                     }));
                 ''')
+                logger.info(f"Garden data fetch succeeded: {summary}")
                 break
             except Exception as e:
+                logger.info(f"Garden data fetch failed: {e}")
                 self.log_msg.emit(f"Garden data fetch failed: {e}")
                 self._ife = None
                 if _init_attempt < 2:
