@@ -264,6 +264,82 @@ class BotWorker(QObject):
                 time.sleep(3)
         raise RuntimeError(f"Failed to re-init after {init_retries} attempts")
 
+    def _check_browser_alive(self):
+        """Check if the browser context and page are still responsive."""
+        if not self._ctx or not self._page:
+            return False
+        try:
+            self._page.evaluate("1 + 1", timeout=5000)
+            return True
+        except Exception:
+            return False
+
+    def _relaunch_browser(self, pw):
+        """Close dead browser context and relaunch. Returns new page or None."""
+        self.log_msg.emit("Attempting browser relaunch...")
+        try:
+            if self._ctx:
+                try:
+                    self._ctx.close()
+                except Exception:
+                    pass
+                self._ctx = None
+            self._ife = None
+            self._page = None
+
+            profile_dir = self.config.get("user_data_dir", "")
+            if not profile_dir or "_MEI" in profile_dir:
+                base = os.path.dirname(sys.executable) if getattr(sys, "frozen", False) else os.getcwd()
+                profile_dir = os.path.join(base, "profile")
+                self.config["user_data_dir"] = profile_dir
+
+            headless = self.config.get("headless", False)
+            self._ctx = pw.chromium.launch_persistent_context(
+                user_data_dir=profile_dir,
+                headless=headless,
+                args=["--window-size=1280,900", "--disable-blink-features=AutomationControlled"],
+                ignore_default_args=["--enable-automation"],
+                no_viewport=True,
+            )
+            self._ctx.add_init_script("""
+                Object.defineProperty(navigator, 'webdriver', {get: () => undefined});
+            """)
+            self._page = self._ctx.pages[0]
+            self._page.goto("https://chainers.io/game/farm", timeout=60000)
+            self.log_msg.emit("Browser relaunched — waiting for page load...")
+            time.sleep(3)
+
+            if self._ensure_game_ready():
+                self.log_msg.emit("Browser relaunch successful — game re-initialized")
+                return self._page
+            else:
+                self.log_msg.emit("Browser relaunched but game init failed")
+                return self._page
+        except Exception as e:
+            self.log_msg.emit(f"Browser relaunch failed: {e}")
+            return None
+
+    def _sleep_with_health_check(self, seconds, pw):
+        """Sleep that checks browser health every 30s and relaunches if dead."""
+        elapsed = 0.0
+        interval = 30
+        while elapsed < seconds:
+            if self._stop.is_set():
+                return True
+            chunk = min(interval, seconds - elapsed)
+            self._stop.wait(chunk)
+            elapsed += chunk
+            if not self._stop.is_set() and not self._check_browser_alive():
+                self.log_msg.emit("Browser died during sleep — relaunching...")
+                new_page = self._relaunch_browser(pw)
+                if new_page:
+                    self.log_msg.emit("Recovered from browser crash")
+                else:
+                    self.log_msg.emit("FATAL: Could not recover browser")
+                    self._farming_active = False
+                    return True
+        return False
+
     def _js_evaluate(self, wrapped):
         while True:
             if self._stop.is_set():
@@ -730,6 +806,7 @@ class BotWorker(QObject):
                     os.environ["PLAYWRIGHT_BROWSERS_PATH"] = ms_dir
             from playwright.sync_api import sync_playwright
             with sync_playwright() as pw:
+                self._pw = pw
                 profile_dir = self.config.get("user_data_dir", "")
                 if not profile_dir or "_MEI" in profile_dir:
                     base = os.path.dirname(sys.executable) if getattr(sys, "frozen", False) else os.getcwd()
@@ -873,6 +950,15 @@ class BotWorker(QObject):
         while self._farming_active and not self._stop.is_set():
             now = time.time()
 
+            if not self._check_browser_alive():
+                self.log_msg.emit("Browser not responding — attempting relaunch...")
+                new_page = self._relaunch_browser(pw)
+                if not new_page:
+                    self.log_msg.emit("FATAL: Could not recover browser — stopping")
+                    self._farming_active = False
+                    break
+                page = new_page
+
             check_interval = self.config.get("offline_check_interval_hours", 24) * 3600
             if now - last_offline_check >= check_interval:
                 last_offline_check = now
@@ -922,9 +1008,9 @@ class BotWorker(QObject):
                 self.log_msg.emit(f"Session ended ({session_duration / 3600:.0f}h). Break {break_sec / 60:.0f}m")
                 self.status_msg.emit(f"Session break ({break_sec / 60:.0f}m)")
                 self.memory_updated.emit()
-                self._stop.wait(break_sec)
-                if self._stop.is_set():
-                    self.log_msg.emit("Stop signal received during session break")
+                if self._sleep_with_health_check(break_sec, pw):
+                    if self._stop.is_set():
+                        self.log_msg.emit("Stop signal received during session break")
                     break
                 session_start = None
                 self.memory.generate_profiles()
@@ -1046,6 +1132,16 @@ class BotWorker(QObject):
                 consecutive_failures += 1
                 err_msg = f"Cycle error ({consecutive_failures}/{max_failures}): {ex}"
                 self.log_msg.emit(err_msg)
+                if "Target closed" in str(ex) or "Browser" in str(ex) or "Connection" in str(ex):
+                    self.log_msg.emit("Browser crash detected — attempting relaunch...")
+                    new_page = self._relaunch_browser(pw)
+                    if new_page:
+                        page = new_page
+                        consecutive_failures = 0
+                        self.log_msg.emit("Recovered from browser crash — continuing")
+                    else:
+                        self.log_msg.emit("Could not recover browser — stopping")
+                        break
                 if self._bridge:
                     self._bridge.update_status(errors=consecutive_failures, last_cycle_result=f"error: {ex}")
                 if consecutive_failures >= max_failures:
@@ -1089,9 +1185,10 @@ class BotWorker(QObject):
                 )
             self.log_msg.emit(f"Next cycle in {delay:.0f}s")
             self.status_msg.emit(f"Next cycle in {delay:.0f}s")
-            self._stop.wait(delay)
-            if self._stop.is_set():
-                self.log_msg.emit(f"Stop signal received during inter-cycle delay after cycle {cycle_count}")
+            if self._sleep_with_health_check(delay, pw):
+                if self._stop.is_set():
+                    self.log_msg.emit(f"Stop signal received during inter-cycle delay after cycle {cycle_count}")
+                break
             else:
                 self.log_msg.emit("Delay over, resuming")
 
