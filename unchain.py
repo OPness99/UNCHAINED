@@ -877,9 +877,12 @@ class BotWorker(QObject):
                     self._stop.wait(0.3)
                 self.log_msg.emit("Browser closed")
         except Exception as e:
-            self.log_msg.emit(f"ERROR: {e}")
+            logger.error(f"FATAL ERROR in run(): {e}")
             import traceback
-            for line in traceback.format_exc().split("\n"):
+            tb = traceback.format_exc()
+            logger.error(tb)
+            self.log_msg.emit(f"ERROR: {e}")
+            for line in tb.split("\n"):
                 if line.strip():
                     self.log_msg.emit(f"  {line}")
             self.status_msg.emit(f"Error: {e}")
@@ -981,6 +984,7 @@ class BotWorker(QObject):
         for s in (summary if isinstance(summary, list) else []):
             self.log_msg.emit(f"  Garden '{s.get('code')}': {s.get('bed_count')} beds")
 
+        logger.info("Setting up tracker and session state...")
         tracker = PlotTracker()
         cycle_count = 0
 
@@ -1005,8 +1009,10 @@ class BotWorker(QObject):
 
         while self._farming_active and not self._stop.is_set():
             now = time.time()
+            browser_ok = self._check_browser_alive()
+            logger.info(f"Farming loop iteration, browser_alive={browser_ok}")
 
-            if not self._check_browser_alive():
+            if not browser_ok:
                 self.log_msg.emit("Browser not responding — attempting relaunch...")
                 new_page = self._relaunch_browser(pw)
                 if not new_page:
@@ -1042,11 +1048,18 @@ class BotWorker(QObject):
                 choices = self.config.get("session_duration_choices", [2, 4, 6, 10])
                 session_duration = random.choice(choices) * 3600
                 session_start = now
-                self.memory.start_session(self.config)
+                try:
+                    self.memory.start_session(self.config)
+                except Exception as e:
+                    logger.info(f"start_session failed: {e}")
                 self.log_msg.emit(f"New session started: {session_duration / 3600:.0f}h")
 
                 # Event detection: check for active boost events
-                detected = detect_active_events(self._page)
+                try:
+                    detected = detect_active_events(self._page)
+                except Exception as e:
+                    logger.info(f"detect_active_events failed: {e}")
+                    detected = None
                 if detected:
                     strategy = get_event_strategy(detected)
                     if strategy:
@@ -1106,7 +1119,9 @@ class BotWorker(QObject):
             self.status_msg.emit(f"Cycle {cycle_count} (session {elapsed / 3600:.1f}/{session_duration / 3600:.0f}h)")
 
             try:
+                logger.info(f"Running cycle {cycle_count} via run_bot_cycle...")
                 results = run_bot_cycle(ife, tracker, self.config, sleep_fn=self._make_sleep_fn(lambda: self._farming_active), ml_max_actions=ml_max_actions_override)
+                logger.info(f"Cycle {cycle_count} completed: {results}")
                 h = len(results["harvested"])
                 p = len(results["planted"])
                 e = len(results["errors"])
