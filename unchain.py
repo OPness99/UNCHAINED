@@ -274,6 +274,20 @@ class BotWorker(QObject):
         except Exception:
             return False
 
+    def _kill_orphan_chrome(self):
+        """Kill orphaned Chrome/Chromium processes that may lock the profile."""
+        import subprocess
+        try:
+            result = subprocess.run(
+                ["taskkill", "/F", "/IM", "chrome.exe"],
+                capture_output=True, timeout=10
+            )
+            if result.returncode == 0:
+                self.log_msg.emit("Killed orphaned Chrome processes")
+                time.sleep(2)
+        except Exception:
+            pass
+
     def _relaunch_browser(self, pw):
         """Close dead browser context and relaunch. Returns new page or None."""
         self.log_msg.emit("Attempting browser relaunch...")
@@ -805,6 +819,7 @@ class BotWorker(QObject):
                 if os.path.isdir(ms_dir):
                     os.environ["PLAYWRIGHT_BROWSERS_PATH"] = ms_dir
             from playwright.sync_api import sync_playwright
+            self._kill_orphan_chrome()
             with sync_playwright() as pw:
                 self._pw = pw
                 profile_dir = self.config.get("user_data_dir", "")
@@ -906,7 +921,7 @@ class BotWorker(QObject):
             try:
                 return self._ife(script)
             except Exception as e:
-                self.log_msg.emit(f"Connection lost ({e}) â€” reconnecting...")
+                self.log_msg.emit(f"Connection lost ({e}) - reconnecting...")
                 self._ife = None
                 try:
                     self._reconnect_ife()
@@ -914,14 +929,30 @@ class BotWorker(QObject):
                     raise RuntimeError(f"Reconnect after loss failed: {re}")
                 return self._ife(script)
 
-        summary = ife('''
-            let api = new API();
-            let g = (await api.get_user_gardens())._data;
-            return g.map(garden => ({
-                code: garden.code,
-                bed_count: (garden.placedBeds || []).length
-            }));
-        ''')
+        summary = None
+        for _init_attempt in range(3):
+            try:
+                self.log_msg.emit(f"Fetching garden data (attempt {_init_attempt + 1})...")
+                summary = ife('''
+                    let api = new API();
+                    let g = (await api.get_user_gardens())._data;
+                    return g.map(garden => ({
+                        code: garden.code,
+                        bed_count: (garden.placedBeds || []).length
+                    }));
+                ''')
+                break
+            except Exception as e:
+                self.log_msg.emit(f"Garden data fetch failed: {e}")
+                self._ife = None
+                if _init_attempt < 2:
+                    self.log_msg.emit("Retrying in 5s...")
+                    self._stop.wait(5)
+                else:
+                    self.log_msg.emit("FATAL: Could not fetch garden data after 3 attempts")
+                    self._farming_active = False
+                    self.state_changed.emit("launched")
+                    return
         for s in (summary if isinstance(summary, list) else []):
             self.log_msg.emit(f"  Garden '{s.get('code')}': {s.get('bed_count')} beds")
 
