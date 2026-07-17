@@ -87,14 +87,13 @@ class BotWorker(QObject):
         self._bridge = bridge
         self._stop = threading.Event()
         self._want_start_farming = threading.Event()
-        self._want_start_tasks = threading.Event()
         self._want_seed_config = threading.Event()
         self._want_one_cycle = threading.Event()
         self._want_task_refresh = threading.Event()
         self._want_recipes = threading.Event()
         self._farming_active = False
-        self._tasks_active = False
-        self._task_manager = TaskManager()
+        self._farming_active = False
+        self._task_manager = TaskManager(llm_engine=llm_engine, memory=self.memory)
         self._task_manager.set_config(config)
         self._ctx = None
         self._page = None
@@ -143,14 +142,8 @@ class BotWorker(QObject):
     def request_start_farming(self):
         self._want_start_farming.set()
 
-    def request_start_tasks(self):
-        self._want_start_tasks.set()
-
     def request_stop_farming(self):
         self._farming_active = False
-
-    def request_stop_tasks(self):
-        self._tasks_active = False
 
     def _make_sleep_fn(self, check_fn=None):
         def interruptible_sleep(seconds):
@@ -390,7 +383,7 @@ class BotWorker(QObject):
         """Sleep that checks for stop signals every 0.5s."""
         waited = 0.0
         while waited < seconds:
-            if self._stop.is_set() or not self._tasks_active:
+            if self._stop.is_set() or not self._farming_active:
                 return True
             chunk = min(0.5, seconds - waited)
             self._stop.wait(chunk)
@@ -408,6 +401,14 @@ class BotWorker(QObject):
         if not self.config.get("task_wall_enabled", True):
             return
         try:
+            # Periodic claim API re-discovery (every 10 cycles)
+            if not hasattr(self, '_claim_refresh_counter'):
+                self._claim_refresh_counter = 0
+            self._claim_refresh_counter += 1
+            if self._claim_refresh_counter >= 10:
+                self._claim_refresh_counter = 0
+                self._task_manager._claim_api_pattern = None
+
             missions = self._task_manager.refresh(page=self._page, ife=ife)
             if not missions:
                 self.log_msg.emit("No missions found on task wall")
@@ -437,7 +438,7 @@ class BotWorker(QObject):
                     self.log_msg.emit(f"=== Continuing {len(active_tasks)} active task(s) ===")
 
                     for at in active_tasks:
-                        if self._stop.is_set() or not self._tasks_active:
+                        if self._stop.is_set() or not self._farming_active:
                             break
 
                         # Find matching mission from wall
@@ -490,22 +491,18 @@ class BotWorker(QObject):
                             active_continued += 1
                             self._ai_planner.record_step(mission, f"Continued at {time.strftime('%H:%M')}")
 
-                        if self._stop.is_set() or not self._tasks_active:
+                        if self._stop.is_set() or not self._farming_active:
                             break
                         self._interruptible_sleep(random.uniform(2, 4))
 
             # Phase 3: Process new tasks
             actionable = []
-            skipped_farming = 0
             for m in best:
                 if m.is_done:
                     continue
                 if m.can_claim:
                     continue
                 if m.task_type == TaskType.EXTERNAL and self.config.get("task_wall_skip_external", True):
-                    continue
-                if m.task_type == TaskType.FARMING:
-                    skipped_farming += 1
                     continue
                 if m.feasibility_score < 1.0:
                     continue
@@ -515,9 +512,6 @@ class BotWorker(QObject):
                     if task_key in self._ai_planner._active_tasks:
                         continue
                 actionable.append(m)
-
-            if skipped_farming:
-                self.log_msg.emit(f"  Skipped {skipped_farming} farming task(s) — use Start Farming for plant/harvest")
 
             # AI Task Planning for new tasks
             if self._ai_planner and self._llm_engine and self._llm_engine.available:
@@ -552,7 +546,7 @@ class BotWorker(QObject):
             for mission in actionable:
                 if executed >= max_simult:
                     break
-                if self._stop.is_set() or not self._tasks_active:
+                if self._stop.is_set() or not self._farming_active:
                     break
 
                 # Check if AI recommends skipping
@@ -581,7 +575,7 @@ class BotWorker(QObject):
                     self._ai_planner.mark_task_attempted(mission.task_id, mission.title)
 
                 try:
-                    result = execute_task(ife, tracker, self.config, mission, sleep_fn=self._make_sleep_fn(lambda: self._tasks_active))
+                    result = execute_task(ife, tracker, self.config, mission, sleep_fn=self._make_sleep_fn(lambda: self._farming_active))
                     if isinstance(result, dict):
                         errors = result.get('errors', [])
                         if errors:
@@ -613,7 +607,7 @@ class BotWorker(QObject):
                 except Exception as e:
                     self.log_msg.emit(f"  Error: {e}")
 
-                if self._stop.is_set() or not self._tasks_active:
+                if self._stop.is_set() or not self._farming_active:
                     break
                 self._interruptible_sleep(random.uniform(3, 6))
 
@@ -651,7 +645,7 @@ class BotWorker(QObject):
                         to_plant = min(resource_check["have"], active_task.remaining)
                         self.log_msg.emit(f"  Planting {to_plant} {needed_seed} seeds...")
                         result = execute_plant_task(ife, tracker, self.config, seed_code, to_plant,
-                                                    sleep_fn=self._make_sleep_fn(lambda: self._tasks_active))
+                                                    sleep_fn=self._make_sleep_fn(lambda: self._farming_active))
                         if isinstance(result, dict) and not result.get('errors'):
                             planted = len(result.get('planted', []))
                             if planted > 0:
@@ -664,7 +658,7 @@ class BotWorker(QObject):
             elif active_task.completed_amount < active_task.required_amount:
                 self.log_msg.emit(f"  No seeds available — checking for harvestable crops...")
                 harvest_result = execute_harvest_task(ife, tracker, self.config, count=None,
-                                                      sleep_fn=self._make_sleep_fn(lambda: self._tasks_active))
+                                                      sleep_fn=self._make_sleep_fn(lambda: self._farming_active))
                 if isinstance(harvest_result, dict):
                     harvested = harvest_result.get('harvested', 0)
                     if harvested > 0:
@@ -683,7 +677,7 @@ class BotWorker(QObject):
             if resource_check["enough"]:
                 # Resources available, try executing
                 result = execute_task(ife, None, self.config, mission,
-                                      sleep_fn=self._make_sleep_fn(lambda: self._tasks_active))
+                                      sleep_fn=self._make_sleep_fn(lambda: self._farming_active))
                 if isinstance(result, dict) and not result.get('errors'):
                     self._ai_planner.update_progress(mission, 1)
                     self.log_msg.emit(f"  Progress: {active_task.completed_amount}/{active_task.required_amount}")
@@ -705,97 +699,20 @@ class BotWorker(QObject):
             "session_elapsed_h": getattr(self, '_session_start', 0),
         }
 
-    def _run_task_loop(self, page):
-        """Dedicated task execution loop â€” runs independently from farming."""
-        self.log_msg.emit("=== Starting task automation ===")
-        self.log_msg.emit("Tasks mode: scans mission wall, skips farming â€” executes feeding/collection/crafting only")
-        self.state_changed.emit("tasks_running")
-        if self._bridge:
-            self._bridge.update_status(state="tasks_running")
-
-        if not self._ensure_game_ready():
-            self.status_msg.emit("Error: game init failed")
-            self.state_changed.emit("launched")
-            self._tasks_active = False
-            return
-
-        def ife(script):
-            if self._stop.is_set() or not self._tasks_active:
-                raise RuntimeError("Stop requested")
-            if not self._ife:
-                try:
-                    self._reconnect_ife()
-                except Exception as e:
-                    self.log_msg.emit(f"Auto-reconnect failed: {e}")
-                    raise
-            try:
-                return self._ife(script)
-            except Exception as e:
-                self.log_msg.emit(f"Connection lost ({e}) â€” reconnecting...")
-                self._ife = None
-                try:
-                    self._reconnect_ife()
-                except Exception as re:
-                    raise RuntimeError(f"Reconnect after loss failed: {re}")
-                return self._ife(script)
-
-        tracker = PlotTracker()
-        task_count = 0
-
-        self.log_msg.emit("Scanning task wall...")
-        try:
-            self._handle_task_refresh()
-        except Exception as e:
-            self.log_msg.emit(f"Initial scan error: {e}")
-
-        while self._tasks_active and not self._stop.is_set():
-            task_count += 1
-            self.log_msg.emit(f"--- Task cycle {task_count} ---")
-            self.status_msg.emit(f"Task cycle {task_count}")
-
-            try:
-                self._run_task_cycle(ife, tracker)
-            except Exception as e:
-                self.log_msg.emit(f"Task cycle error: {e}")
-
-            if self._stop.is_set() or not self._tasks_active:
-                self.log_msg.emit(f"Task loop exit: stop_set={self._stop.is_set()}, tasks_active={self._tasks_active}")
-                break
-
-            delay = random.uniform(
-                self.config.get("cycle_delay_min", 90),
-                self.config.get("cycle_delay_max", 180),
-            )
-            self.log_msg.emit(f"Next task cycle in {delay:.0f}s")
-            self.status_msg.emit(f"Tasks â€” next in {delay:.0f}s")
-            if self._interruptible_sleep(delay):
-                self.log_msg.emit("Task loop interrupted during delay")
-                break
-
-        self._tasks_active = False
-        self.memory.generate_profiles()
-        self.log_msg.emit(f"Task automation stopped after {task_count} cycle(s)")
-        self.status_msg.emit("Tasks idle")
-        self.state_changed.emit("launched")
-        if self._bridge:
-            self._bridge.update_status(state="launched")
-
     def request_stop(self):
         self._stop.set()
         self._farming_active = False
-        self._tasks_active = False
 
 
     @Slot()
     def run(self):
         self._stop.clear()
         self._want_start_farming.clear()
-        self._want_start_tasks.clear()
         self._want_one_cycle.clear()
         self._want_seed_config.clear()
         self._want_task_refresh.clear()
         self._farming_active = False
-        self._tasks_active = False
+        self._farming_active = False
         self.status_msg.emit("Launching browser...")
         try:
             if getattr(sys, "frozen", False):
@@ -841,18 +758,8 @@ class BotWorker(QObject):
                 while not self._stop.is_set():
                     if self._want_start_farming.is_set():
                         self._want_start_farming.clear()
-                        if self._tasks_active:
-                            self.log_msg.emit("Cannot start farming while tasks are running â€” stopping tasks first")
-                            self._tasks_active = False
                         self._farming_active = True
                         self._run_bot_cycles(page)
-                    if self._want_start_tasks.is_set():
-                        self._want_start_tasks.clear()
-                        if self._farming_active:
-                            self.log_msg.emit("Cannot start tasks while farming is running â€” stopping farming first")
-                            self._farming_active = False
-                        self._tasks_active = True
-                        self._run_task_loop(page)
                     if self._want_seed_config.is_set():
                         self._want_seed_config.clear()
                         self._handle_seed_config_request()
@@ -1064,6 +971,12 @@ class BotWorker(QObject):
                 self.log_msg.emit(f"Cycle {cycle_count}: harvested={h} planted={p} errors={e}")
                 self.cycle_completed.emit(cycle_count)
                 self.memory.log_cycle(results)
+
+                if self.config.get("task_wall_enabled", True) and self._page:
+                    try:
+                        self._run_task_cycle(ife, tracker)
+                    except Exception as te:
+                        self.log_msg.emit(f"Task wall error: {te}")
                 if self._bridge:
                     self._bridge.update_status(
                         cycle=cycle_count, harvested=h, planted=p, errors=e,
@@ -1721,30 +1634,15 @@ class UnchainedWindow(QMainWindow):
         farm_label.setStyleSheet("font-size: 9pt; font-weight: 700; color: #5a8a5a; padding: 2px 4px;")
         tb2.addWidget(farm_label)
 
-        self.start_btn = QPushButton("Plant / Harvest")
+        self.start_btn = QPushButton("Start Bot")
         self.start_btn.setEnabled(False)
-        self.stop_btn = QPushButton("Stop Farm")
+        self.stop_btn = QPushButton("Stop Bot")
         self.stop_btn.setEnabled(False)
         self.one_cycle_btn = QPushButton("1 Cycle")
         self.one_cycle_btn.setEnabled(False)
         self.seed_config_btn = QPushButton("Seed Config")
 
         for b in (self.start_btn, self.stop_btn, self.one_cycle_btn, self.seed_config_btn):
-            b.setStyleSheet(btn_flat)
-            tb2.addWidget(b)
-
-        tb2.addSpacing(20)
-
-        task_label = QLabel("TASKS")
-        task_label.setStyleSheet("font-size: 9pt; font-weight: 700; color: #8a8a5a; padding: 2px 4px;")
-        tb2.addWidget(task_label)
-
-        self.start_tasks_btn = QPushButton("Run Missions")
-        self.start_tasks_btn.setEnabled(False)
-        self.stop_tasks_btn = QPushButton("Stop Tasks")
-        self.stop_tasks_btn.setEnabled(False)
-
-        for b in (self.start_tasks_btn, self.stop_tasks_btn):
             b.setStyleSheet(btn_flat)
             tb2.addWidget(b)
 
@@ -1866,8 +1764,6 @@ class UnchainedWindow(QMainWindow):
         self.one_cycle_btn.clicked.connect(self._run_one_cycle)
         self.vpn_btn.clicked.connect(self._toggle_vpn_panel)
         self.discord_btn.clicked.connect(self._toggle_discord)
-        self.start_tasks_btn.clicked.connect(self._start_tasks)
-        self.stop_tasks_btn.clicked.connect(self._stop_tasks)
         self.settings_btn.clicked.connect(self._open_settings)
         self.ml_check.stateChanged.connect(self._on_ml_toggle)
         log_bridge.message.connect(self._append_log)
@@ -2094,27 +1990,12 @@ class UnchainedWindow(QMainWindow):
             self._bot_worker.request_start_farming()
             self.start_btn.setEnabled(False)
             self.stop_btn.setEnabled(True)
-            self.start_tasks_btn.setEnabled(False)
-            self._append_log("Starting farming...")
+            self._append_log("Starting bot (farming + missions)...")
 
     def _stop_farming(self):
         if self._bot_worker:
             self._bot_worker.request_stop_farming()
-            self._append_log("Stopping farming...")
-
-    def _start_tasks(self):
-        if self._bot_worker:
-            self._bot_worker.request_start_tasks()
-            self.start_tasks_btn.setEnabled(False)
-            self.stop_tasks_btn.setEnabled(True)
-            self.start_btn.setEnabled(False)
-            self.tasks_panel.setVisible(True)
-            self._append_log("Starting task automation...")
-
-    def _stop_tasks(self):
-        if self._bot_worker:
-            self._bot_worker.request_stop_tasks()
-            self._append_log("Stopping tasks...")
+            self._append_log("Stopping bot...")
 
     def _open_seed_config(self):
         if self._bot_worker:
@@ -2184,8 +2065,6 @@ class UnchainedWindow(QMainWindow):
             self.launch_btn.setEnabled(True)
             self.start_btn.setEnabled(False)
             self.stop_btn.setEnabled(False)
-            self.start_tasks_btn.setEnabled(False)
-            self.stop_tasks_btn.setEnabled(False)
             self.one_cycle_btn.setEnabled(False)
             if self._bot_thread:
                 self._bot_thread.quit()
@@ -2197,29 +2076,16 @@ class UnchainedWindow(QMainWindow):
             self.launch_btn.setEnabled(False)
             self.start_btn.setEnabled(True)
             self.stop_btn.setEnabled(False)
-            self.start_tasks_btn.setEnabled(True)
-            self.stop_tasks_btn.setEnabled(False)
             self.one_cycle_btn.setEnabled(True)
         elif state == "bot_running":
             self.launch_btn.setEnabled(False)
             self.start_btn.setEnabled(False)
             self.stop_btn.setEnabled(True)
-            self.start_tasks_btn.setEnabled(False)
-            self.stop_tasks_btn.setEnabled(False)
             self.one_cycle_btn.setEnabled(True)
-        elif state == "tasks_running":
-            self.launch_btn.setEnabled(False)
-            self.start_btn.setEnabled(False)
-            self.stop_btn.setEnabled(False)
-            self.start_tasks_btn.setEnabled(False)
-            self.stop_tasks_btn.setEnabled(True)
-            self.one_cycle_btn.setEnabled(False)
         elif state == "error":
             self.launch_btn.setEnabled(True)
             self.start_btn.setEnabled(False)
             self.stop_btn.setEnabled(False)
-            self.start_tasks_btn.setEnabled(False)
-            self.stop_tasks_btn.setEnabled(False)
             self.one_cycle_btn.setEnabled(False)
             self.brain_viewer.rebuild()
 

@@ -96,7 +96,7 @@ class Mission:
         return d
 
 
-def classify_task(title: str) -> TaskType:
+def classify_task(title: str, llm_engine=None) -> TaskType:
     title_lower = title.lower()
     for pattern, ttype in TASK_TITLE_PATTERNS:
         m = pattern.search(title_lower)
@@ -112,6 +112,24 @@ def classify_task(title: str) -> TaskType:
         return TaskType.COLLECTION
     if "cpx" in title_lower or "external" in title_lower or "offer" in title_lower:
         return TaskType.EXTERNAL
+    
+    if llm_engine and llm_engine.available:
+        try:
+            response = llm_engine._ask(
+                f"Classify this game task into one of these categories: FARMING, FEEDING, CRAFTING, COLLECTION, EXTERNAL, META, or UNKNOWN.\n"
+                f"Task: \"{title}\"\n"
+                "Return ONLY the category name.",
+                temperature=0.1,
+                max_tokens=10
+            )
+            if response:
+                response_upper = response.strip().upper()
+                for tt in TaskType:
+                    if tt.value.upper() == response_upper:
+                        return tt
+        except Exception:
+            pass
+    
     return TaskType.UNKNOWN
 
 
@@ -128,7 +146,6 @@ JS_SCRAPE_MISSIONS = """
 
     for (let ti = 0; ti < tabButtons.length && ti < tabNames.length; ti++) {
         const tabName = tabNames[ti];
-        if (tabName === 'taskwall') continue;
 
         tabButtons[ti].click();
         await new Promise(r => setTimeout(r, 300));
@@ -298,13 +315,15 @@ JS_GET_CAPTURED = """
 class TaskManager:
     """Reads, assesses, and prioritizes missions from the game's mission wall."""
 
-    def __init__(self):
+    def __init__(self, llm_engine=None, memory=None):
         self._missions: List[Mission] = []
         self._last_fetch: float = 0
         self._fetch_interval: float = 60
         self._config: Dict[str, Any] = {}
         self._claim_api_pattern: Optional[Dict[str, Any]] = None
         self._interceptor_installed: bool = False
+        self._llm_engine = llm_engine
+        self._memory = memory
 
     @property
     def missions(self):
@@ -395,6 +414,25 @@ class TaskManager:
         elif mission.reward_count >= 2:
             score += 0.5
             reasons.append(f"Reward: {mission.reward_count}x")
+        
+        if self._memory:
+            try:
+                task_key = f"{mission.task_type.value}_{mission.raw_title}"
+                history = self._memory.get_task_history(task_key) if hasattr(self._memory, 'get_task_history') else None
+                if history:
+                    success_rate = history.get('success_rate', 0.5)
+                    avg_time = history.get('avg_time_minutes', 0)
+                    if success_rate > 0.8:
+                        score += 1.0
+                        reasons.append(f"Historical success: {success_rate:.0%}")
+                    elif success_rate < 0.3:
+                        score -= 1.0
+                        reasons.append(f"Historical failure: {success_rate:.0%}")
+                    if 0 < avg_time < 5:
+                        score += 0.5
+                        reasons.append(f"Fast task: {avg_time:.1f} min avg")
+            except Exception:
+                pass
 
         mission.feasibility_score = score
         mission.feasibility_reasons = reasons
@@ -420,7 +458,7 @@ class TaskManager:
                 m = Mission(
                     task_id=item.get("task_id", ""),
                     title=item.get("title", ""),
-                    task_type=classify_task(item.get("title", "")),
+                    task_type=classify_task(item.get("title", ""), self._llm_engine),
                     progress_current=int(item.get("progress_current", 0) or 0),
                     progress_required=int(item.get("progress_required", 0) or 0),
                     reward_count=int(item.get("reward_count", 0) or 0),
@@ -475,7 +513,7 @@ class TaskManager:
                     m = Mission(
                         task_id=str(item.get("id", item.get("missionID", ""))),
                         title=item.get("title", item.get("name", "")),
-                        task_type=classify_task(item.get("title", item.get("name", ""))),
+                        task_type=classify_task(item.get("title", item.get("name", "")), self._llm_engine),
                         progress_current=item.get("current", item.get("progress", 0)),
                         progress_required=item.get("required", item.get("target", 0)),
                         reward_count=item.get("rewardCount", item.get("reward", 0)),
