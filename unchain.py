@@ -955,13 +955,6 @@ class BotWorker(QObject):
         for s in (summary if isinstance(summary, list) else []):
             self.log_msg.emit(f"  Garden '{s.get('code')}': {s.get('bed_count')} beds")
 
-        try:
-            self._handle_seed_config_request()
-        except Exception as e:
-            self.log_msg.emit(f"Seed config fetch failed (non-fatal): {e}")
-
-        time.sleep(2)
-
         tracker = PlotTracker()
         cycle_count = 0
 
