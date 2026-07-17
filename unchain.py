@@ -1014,7 +1014,7 @@ class BotWorker(QObject):
 
             if not browser_ok:
                 self.log_msg.emit("Browser not responding — attempting relaunch...")
-                new_page = self._relaunch_browser(pw)
+                new_page = self._relaunch_browser(self._pw)
                 if not new_page:
                     self.log_msg.emit("FATAL: Could not recover browser — stopping")
                     self._farming_active = False
@@ -1077,7 +1077,7 @@ class BotWorker(QObject):
                 self.log_msg.emit(f"Session ended ({session_duration / 3600:.0f}h). Break {break_sec / 60:.0f}m")
                 self.status_msg.emit(f"Session break ({break_sec / 60:.0f}m)")
                 self.memory_updated.emit()
-                if self._sleep_with_health_check(break_sec, pw):
+                if self._sleep_with_health_check(break_sec, self._pw):
                     if self._stop.is_set():
                         self.log_msg.emit("Stop signal received during session break")
                     break
@@ -1205,7 +1205,7 @@ class BotWorker(QObject):
                 self.log_msg.emit(err_msg)
                 if "Target closed" in str(ex) or "Browser" in str(ex) or "Connection" in str(ex):
                     self.log_msg.emit("Browser crash detected — attempting relaunch...")
-                    new_page = self._relaunch_browser(pw)
+                    new_page = self._relaunch_browser(self._pw)
                     if new_page:
                         page = new_page
                         consecutive_failures = 0
@@ -1256,7 +1256,7 @@ class BotWorker(QObject):
                 )
             self.log_msg.emit(f"Next cycle in {delay:.0f}s")
             self.status_msg.emit(f"Next cycle in {delay:.0f}s")
-            if self._sleep_with_health_check(delay, pw):
+            if self._sleep_with_health_check(delay, self._pw):
                 if self._stop.is_set():
                     self.log_msg.emit(f"Stop signal received during inter-cycle delay after cycle {cycle_count}")
                 break
