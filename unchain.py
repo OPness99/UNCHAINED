@@ -270,7 +270,7 @@ class BotWorker(QObject):
         if not self._ctx or not self._page:
             return False
         try:
-            self._page.evaluate("1 + 1", timeout=5000)
+            self._page.evaluate("1 + 1", timeout=10000)
             return True
         except Exception:
             return False
@@ -345,6 +345,11 @@ class BotWorker(QObject):
             self._stop.wait(chunk)
             elapsed += chunk
             if not self._stop.is_set() and not self._check_browser_alive():
+                logger.info("Browser died during sleep — retrying check in 10s...")
+                time.sleep(10)
+                if self._check_browser_alive():
+                    logger.info("Browser recovered on its own")
+                    continue
                 self.log_msg.emit("Browser died during sleep — relaunching...")
                 new_page = self._relaunch_browser(pw)
                 if new_page:
@@ -1006,20 +1011,29 @@ class BotWorker(QObject):
         consecutive_failures = 0
         max_failures = self.config.get("max_consecutive_failures", 10)
         self.log_msg.emit(f"Entering farming loop (max_failures={max_failures})")
+        _last_relaunch = 0.0
 
         while self._farming_active and not self._stop.is_set():
             now = time.time()
             browser_ok = self._check_browser_alive()
-            logger.info(f"Farming loop iteration, browser_alive={browser_ok}")
-
             if not browser_ok:
-                self.log_msg.emit("Browser not responding — attempting relaunch...")
-                new_page = self._relaunch_browser(self._pw)
-                if not new_page:
-                    self.log_msg.emit("FATAL: Could not recover browser — stopping")
-                    self._farming_active = False
-                    break
-                page = new_page
+                if now - _last_relaunch < 60:
+                    logger.info(f"Browser not alive but relaunch cooldown ({int(now - _last_relaunch)}s < 60s), waiting...")
+                    self._stop.wait(5)
+                    continue
+                else:
+                    logger.info(f"Farming loop: browser_alive=False, attempting relaunch")
+                    self.log_msg.emit("Browser not responding — attempting relaunch...")
+                    new_page = self._relaunch_browser(self._pw)
+                    if not new_page:
+                        self.log_msg.emit("FATAL: Could not recover browser — stopping")
+                        self._farming_active = False
+                        break
+                    page = new_page
+                    _last_relaunch = time.time()
+                    continue
+            else:
+                logger.info(f"Farming loop iteration, browser_alive=True")
 
             check_interval = self.config.get("offline_check_interval_hours", 24) * 3600
             if now - last_offline_check >= check_interval:
