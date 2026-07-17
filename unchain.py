@@ -266,14 +266,28 @@ class BotWorker(QObject):
         raise RuntimeError(f"Failed to re-init after {init_retries} attempts")
 
     def _check_browser_alive(self):
-        """Check if the browser context and page are still responsive."""
-        if not self._ctx or not self._page:
+        """Check if the browser context and game iframe are still responsive."""
+        if not self._ctx:
             return False
         try:
-            self._page.evaluate("1 + 1", timeout=10000)
-            return True
+            pages = self._ctx.pages
+            if not pages:
+                return False
         except Exception:
             return False
+        if self._ife:
+            try:
+                result = self._ife("1+1")
+                return result == 2
+            except Exception:
+                pass
+        if self._page:
+            try:
+                self._page.evaluate("1 + 1", timeout=10000)
+                return True
+            except Exception:
+                pass
+        return False
 
     def _kill_orphan_chrome(self):
         """Kill orphaned Chrome/Chromium processes that may lock the profile."""
