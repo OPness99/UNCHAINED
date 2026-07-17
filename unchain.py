@@ -972,7 +972,7 @@ class BotWorker(QObject):
                 self.cycle_completed.emit(cycle_count)
                 self.memory.log_cycle(results)
 
-                if self.config.get("task_wall_enabled", True) and self._page:
+                if self.config.get("task_wall_enabled", True) and self._page and cycle_count % self.config.get("task_wall_check_every_n_cycles", 10) == 0:
                     try:
                         self._run_task_cycle(ife, tracker)
                     except Exception as te:
@@ -2352,6 +2352,13 @@ class SettingsDialog(QDialog):
         self.task_wall_max_spin.setStyleSheet(_spin_style())
         tw_form.addRow("Max per cycle:", self.task_wall_max_spin)
 
+        self.task_wall_cycle_interval_spin = QSpinBox()
+        self.task_wall_cycle_interval_spin.setRange(1, 50)
+        self.task_wall_cycle_interval_spin.setValue(self._config.get("task_wall_check_every_n_cycles", 10))
+        self.task_wall_cycle_interval_spin.setSuffix(" cycles")
+        self.task_wall_cycle_interval_spin.setStyleSheet(_spin_style())
+        tw_form.addRow("Check every:", self.task_wall_cycle_interval_spin)
+
         gen_layout.addWidget(tw_group)
 
         dc_group = QGroupBox("Discord Integration (restart bot after changes)")
@@ -2613,6 +2620,7 @@ class SettingsDialog(QDialog):
         self._config["task_wall_claim_rewards"] = self.task_wall_claim_check.isChecked()
         self._config["task_wall_refresh_seconds"] = self.task_wall_refresh_spin.value()
         self._config["task_wall_max_simultaneous"] = self.task_wall_max_spin.value()
+        self._config["task_wall_check_every_n_cycles"] = self.task_wall_cycle_interval_spin.value()
         self._config["session_break_min_mins"] = int(self.break_min_picker.value_in_hours() * 60)
         self._config["session_break_max_mins"] = int(self.break_max_picker.value_in_hours() * 60)
         self._config["ml_enabled"] = self.ml_enabled_check.isChecked()

@@ -53,6 +53,7 @@ DEFAULT_CONFIG = {
     'task_wall_refresh_seconds': 60,
     'task_wall_auto_select': True,
     'task_wall_max_simultaneous': 3,
+    'task_wall_check_every_n_cycles': 10,
     'task_wall_prefer_farming': True,
     'task_wall_skip_external': True,
     'task_wall_claim_rewards': True,
