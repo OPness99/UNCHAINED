@@ -37,6 +37,10 @@ from task_manager import TaskManager, TaskType, TaskStatus
 from ai_task_planner import AITaskPlanner
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
+from logging.handlers import RotatingFileHandler
+_logger_handler = RotatingFileHandler("unchained.log", maxBytes=5 * 1024 * 1024, backupCount=3, encoding="utf-8")
+_logger_handler.setFormatter(logging.Formatter("%(asctime)s [%(levelname)s] %(message)s"))
+logging.getLogger().addHandler(_logger_handler)
 logger = logging.getLogger("unchained")
 
 
@@ -1300,16 +1304,20 @@ class SeedConfigDialog(QDialog):
 
         if not self._data and saved_config:
             for gc, bed_types in saved_config.items():
+                if gc == "_settings" or not isinstance(bed_types, dict):
+                    continue
                 garden_item = QTreeWidgetItem([gc, ""])
                 garden_item.setFlags(garden_item.flags() & ~Qt.ItemIsSelectable)
                 font = garden_item.font(0)
                 font.setBold(True)
                 garden_item.setFont(0, font)
                 for bc, seeds in bed_types.items():
+                    if not isinstance(seeds, list):
+                        continue
                     type_item = QTreeWidgetItem([bc, "(saved)"])
                     type_item.setFlags(type_item.flags() & ~Qt.ItemIsSelectable)
                     type_item.setData(0, Qt.UserRole, {"garden": gc, "bed_type": bc, "saved": True})
-                    for sc in (seeds or []):
+                    for sc in seeds:
                         seed_item = QTreeWidgetItem([sc, ""])
                         seed_item.setFlags(seed_item.flags() | Qt.ItemIsUserCheckable)
                         seed_item.setCheckState(0, Qt.Checked)
